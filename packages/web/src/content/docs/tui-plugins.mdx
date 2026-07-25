@@ -1,0 +1,209 @@
+---
+title: Add TUI sidebar stats
+description: Create a TUI plugin that adds custom session statistics to the OpenCode sidebar.
+---
+
+This guide creates a local TUI plugin that shows message counts in the session sidebar.
+
+TUI plugins customize the terminal interface. They are separate from [server plugins](/docs/plugins), which respond to server events and tool hooks. See the [TUI plugin API reference](/docs/tui-plugin-api) for all available slots and state fields.
+
+---
+
+## Create the plugin
+
+Create `.opencode/plugins/sidebar-stats.tsx` in your project:
+
+```tsx title=".opencode/plugins/sidebar-stats.tsx"
+/** @jsxImportSource @opentui/solid */
+import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { createMemo } from "solid-js"
+
+function SidebarStats(props: { api: TuiPluginApi; sessionID: string }) {
+  const messages = createMemo(() => props.api.state.session.messages(props.sessionID))
+  const userMessages = createMemo(() => messages().filter((message) => message.role === "user").length)
+  const theme = () => props.api.theme.current
+
+  return (
+    <box>
+      <text fg={theme().text}>
+        <b>Messages</b>
+      </text>
+      <text fg={theme().textMuted}>{messages().length} total</text>
+      <text fg={theme().textMuted}>{userMessages()} from you</text>
+    </box>
+  )
+}
+
+const tui: TuiPlugin = async (api) => {
+  api.slots.register({
+    order: 600,
+    slots: {
+      sidebar_content(_context, props) {
+        return <SidebarStats api={api} sessionID={props.session_id} />
+      },
+    },
+  })
+}
+
+const plugin: TuiPluginModule & { id: string } = {
+  id: "example.sidebar-stats",
+  tui,
+}
+
+export default plugin
+```
+
+The `@jsxImportSource` comment enables OpenTUI JSX. Use a `.tsx` extension for plugins that render JSX.
+
+The file must default-export an object containing `tui`. Local file plugins must also provide a non-empty `id`.
+
+---
+
+## Load the plugin
+
+Add the plugin to `.opencode/tui.json`:
+
+```json title=".opencode/tui.json"
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["./plugins/sidebar-stats.tsx"]
+}
+```
+
+Relative paths resolve from the `tui.json` file that declares them.
+
+:::note
+TUI plugins are not discovered automatically. A file in `.opencode/plugins/` does not load until it is listed in `tui.json`.
+:::
+
+To install the plugin globally, use these paths instead:
+
+- `~/.config/opencode/plugins/sidebar-stats.tsx`
+- `~/.config/opencode/tui.json`
+
+Use the same relative plugin path in the global `tui.json` file.
+
+---
+
+## Verify the result
+
+1. Start OpenCode in the project.
+2. Open or create a session.
+3. Press `ctrl+x b` to show the sidebar if it is hidden.
+4. Find the **Messages** block below the built-in sidebar sections.
+
+OpenCode loads TUI plugins once when the process starts. Restart OpenCode after changing the plugin or `tui.json`.
+
+---
+
+## Add another statistic
+
+Read values from `api.state` inside a component, JSX expression, or Solid reactive primitive such as `createMemo`. These reads stay synchronized with the TUI state.
+
+For example, show the number of changed files:
+
+```tsx
+const changedFiles = createMemo(() => props.api.state.session.diff(props.sessionID).length)
+
+return <text fg={theme().textMuted}>{changedFiles()} files changed</text>
+```
+
+Useful state sources include:
+
+| Source                                  | Value                                      |
+| --------------------------------------- | ------------------------------------------ |
+| `api.state.session.get(sessionID)`      | Session metadata, including title and cost |
+| `api.state.session.messages(sessionID)` | Session messages and assistant token usage |
+| `api.state.session.diff(sessionID)`     | Changed files, additions, and deletions    |
+| `api.state.session.todo(sessionID)`     | Session todo items                         |
+| `api.state.session.status(sessionID)`   | Current session status                     |
+| `api.state.provider`                    | Providers, models, and model limits        |
+| `api.state.vcs`                         | Current and default branches               |
+| `api.state.lsp()`                       | Language server statuses                   |
+| `api.state.mcp()`                       | MCP server statuses                        |
+
+Avoid reading a state value once in the top-level `tui` function when the UI must update. That produces a snapshot instead of a reactive read.
+
+---
+
+## Respond to events
+
+Use `api.event.on` when the plugin must react to an event rather than display existing synchronized state:
+
+```ts
+api.event.on("session.updated", (event) => {
+  console.debug("Session updated", event)
+})
+```
+
+The event name controls the inferred event type. The returned function unsubscribes the handler:
+
+```tsx
+import { createSignal, onCleanup } from "solid-js"
+
+function ErrorCount(props: { api: TuiPluginApi }) {
+  const [count, setCount] = createSignal(0)
+  const unsubscribe = props.api.event.on("session.error", () => {
+    setCount((value) => value + 1)
+  })
+
+  onCleanup(unsubscribe)
+  return <text>{count()} errors</text>
+}
+```
+
+OpenCode automatically removes plugin-level event subscriptions when the plugin is deactivated or OpenCode exits. Use `onCleanup` for subscriptions owned by a component that can unmount while the plugin remains active.
+
+---
+
+## Position the block
+
+Slot contributions render in ascending `order`. An omitted order is `0`.
+
+The built-in sidebar content currently uses these ranges:
+
+| Order | Section          |
+| ----- | ---------------- |
+| `100` | Context          |
+| `200` | MCP servers      |
+| `300` | Language servers |
+| `400` | Todo items       |
+| `500` | Changed files    |
+
+Use an order greater than `500` to place content after the built-in sections. Equal values preserve registration order.
+
+---
+
+## Troubleshoot the plugin
+
+| Problem                          | Check                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Plugin does not appear           | Confirm its path is listed in the applicable `tui.json`, then restart OpenCode.                         |
+| Module is ignored                | Confirm the module has a default export shaped as `{ id, tui }`. Named exports are not TUI entrypoints. |
+| Local plugin fails to load       | Confirm `id` is a non-empty string and does not duplicate another plugin ID.                            |
+| JSX fails to parse               | Use a `.tsx` file and include `/** @jsxImportSource @opentui/solid */`.                                 |
+| Values do not update             | Read `api.state` from JSX, a component, or a Solid reactive primitive.                                  |
+| Block appears in the wrong place | Change the slot registration `order`.                                                                   |
+
+Open the command palette and run **Toggle console** to inspect TUI plugin errors. For startup diagnostics, run:
+
+```bash
+opencode --print-logs --log-level DEBUG
+```
+
+Plugin initialization messages use the `tui.plugin` label. Slot setup and rendering messages use `tui.slot`.
+
+---
+
+## Contribute a built-in stat
+
+Use a local plugin unless the statistic should ship with OpenCode for every user.
+
+To add a built-in sidebar section:
+
+1. Add a plugin under `packages/tui/src/feature-plugins/sidebar/` using the same `TuiPlugin` and `sidebar_content` pattern.
+2. Give the plugin an `internal:` ID and export it as a `BuiltinTuiPlugin`.
+3. Import and add it to `createBuiltinPlugins` in `packages/tui/src/feature-plugins/builtins.ts`.
+4. Run `bun typecheck` from `packages/tui`.
+
+If the value is not already exposed by `api.state`, extend `TuiState` in `packages/plugin/src/tui.ts`, populate the synchronized state in `packages/tui/src/context/sync.tsx`, and expose it through `packages/tui/src/plugin/adapters.tsx`. Run `bun typecheck` from both `packages/plugin` and `packages/tui` after changing the public state API.

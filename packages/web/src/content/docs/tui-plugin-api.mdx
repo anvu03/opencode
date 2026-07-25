@@ -1,0 +1,412 @@
+---
+title: TUI plugin API
+description: Reference for TUI plugin modules, slots, state, themes, events, and lifecycle APIs.
+---
+
+TUI plugins extend the OpenCode terminal interface. This page describes the public API exported from `@opencode-ai/plugin/tui`.
+
+For a task-oriented example, see [Add TUI sidebar stats](/docs/tui-plugins). For server event and tool hooks, see [Plugins](/docs/plugins).
+
+---
+
+## Configuration
+
+Declare TUI plugins in `tui.json`:
+
+```json title="tui.json"
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["./plugins/sidebar.tsx", ["@acme/opencode-tui", { "compact": true }]],
+  "plugin_enabled": {
+    "example.sidebar": false
+  }
+}
+```
+
+Each `plugin` entry is either a string specifier or a tuple containing a specifier and options. Specifiers can be npm packages, file URLs, relative paths, or absolute paths. Relative paths resolve from the config file.
+
+`plugin_enabled` maps plugin IDs to explicit enabled states. Plugins are enabled by default. Runtime changes made through the plugin manager are persisted and override this configuration on later starts.
+
+A disabled plugin module is still imported, but its `tui` function is not called. Avoid top-level side effects that assume the plugin is active.
+
+TUI plugins are not discovered from plugin directories. Every TUI plugin must be declared in `tui.json`.
+
+---
+
+## Module shape
+
+A TUI plugin module has one default export:
+
+```ts
+import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+
+const tui: TuiPlugin = async (api, options, meta) => {
+  // Register UI contributions.
+}
+
+const plugin: TuiPluginModule & { id: string } = {
+  id: "example.plugin",
+  tui,
+}
+
+export default plugin
+```
+
+The `tui` signature is:
+
+```ts
+type TuiPlugin = (api: TuiPluginApi, options: Record<string, unknown> | undefined, meta: TuiPluginMeta) => Promise<void>
+```
+
+The loader reads only the default export. It ignores named exports.
+
+File plugins require a non-empty `id`. npm plugins can omit `id`; OpenCode then uses the package name.
+
+npm packages must expose the TUI module through `exports["./tui"]`:
+
+```json title="package.json"
+{
+  "name": "@acme/opencode-tui",
+  "type": "module",
+  "exports": {
+    "./tui": "./dist/tui.js"
+  }
+}
+```
+
+The TUI loader does not use the package root export or `main` as a fallback.
+
+A module cannot contain both TUI and server plugin entrypoints. Packages that support both targets must expose separate `./tui` and `./server` modules.
+
+### Metadata
+
+`meta` describes the loaded module:
+
+| Field          | Type                             | Description                                 |
+| -------------- | -------------------------------- | ------------------------------------------- |
+| `id`           | `string`                         | Resolved plugin ID                          |
+| `source`       | `"file" \| "npm" \| "internal"`  | Plugin source                               |
+| `spec`         | `string`                         | Configured or internal specifier            |
+| `target`       | `string`                         | Resolved module target                      |
+| `requested`    | `string \| undefined`            | Requested package version or specifier      |
+| `version`      | `string \| undefined`            | Resolved package version                    |
+| `modified`     | `number \| undefined`            | File modification time in Unix milliseconds |
+| `state`        | `"first" \| "updated" \| "same"` | State relative to the previous load record  |
+| `first_time`   | `number`                         | First observed time in Unix milliseconds    |
+| `last_time`    | `number`                         | Latest load time in Unix milliseconds       |
+| `time_changed` | `number`                         | Last changed time in Unix milliseconds      |
+| `load_count`   | `number`                         | Number of loads                             |
+| `fingerprint`  | `string`                         | Module fingerprint                          |
+
+---
+
+## API object
+
+The `api` argument is a `TuiPluginApi`:
+
+| Member      | Description                                      |
+| ----------- | ------------------------------------------------ |
+| `app`       | OpenCode application information                 |
+| `attention` | Desktop notifications, sounds, and sound packs   |
+| `keys`      | Host-aware key sequence formatting               |
+| `keymap`    | OpenTUI keymap registration and command dispatch |
+| `mode`      | Current input mode and mode stack                |
+| `route`     | Custom route registration and navigation         |
+| `ui`        | Dialog, prompt, slot, and toast components       |
+| `tuiConfig` | Read-only resolved TUI configuration             |
+| `kv`        | Persistent shared key-value state                |
+| `state`     | Synchronized OpenCode state                      |
+| `theme`     | Current theme tokens and theme selection         |
+| `client`    | Current typed OpenCode SDK client                |
+| `event`     | Typed event subscriptions                        |
+| `renderer`  | OpenTUI `CliRenderer` instance                   |
+| `slots`     | UI slot contribution registration                |
+| `plugins`   | Runtime plugin management                        |
+| `lifecycle` | Abort signal and disposal callbacks              |
+| `command`   | Deprecated command compatibility API             |
+
+---
+
+## Slots
+
+Register one or more contributions with `api.slots.register`:
+
+```tsx
+api.slots.register({
+  order: 600,
+  slots: {
+    sidebar_content(context, props) {
+      return <text fg={context.theme.current.text}>{props.session_id}</text>
+    },
+  },
+})
+```
+
+The registration accepts:
+
+| Field     | Type                          | Description                           |
+| --------- | ----------------------------- | ------------------------------------- |
+| `order`   | `number \| undefined`         | Sort order; defaults to `0`           |
+| `setup`   | `(context, renderer) => void` | Optional setup callback               |
+| `dispose` | `() => void`                  | Optional cleanup callback             |
+| `slots`   | `object`                      | Map of slot names to render functions |
+
+Each render function receives a `TuiSlotContext` and slot-specific props. The context contains `theme`, which is the same `TuiTheme` exposed by `api.theme`.
+
+`register` returns a registration ID string. It does not return an unregister function. OpenCode removes registrations when the plugin is deactivated or disposed.
+
+Contributions render in ascending `order`. Registration order breaks ties.
+
+### Host slots
+
+| Slot                   | Props                                                   | Host mode       | Location                           |
+| ---------------------- | ------------------------------------------------------- | --------------- | ---------------------------------- |
+| `app`                  | `{}`                                                    | `append`        | Application root                   |
+| `app_bottom`           | `{}`                                                    | `append`        | Bottom of application root         |
+| `home_logo`            | `{}`                                                    | `replace`       | Home logo                          |
+| `home_prompt`          | `{ ref? }`                                              | `replace`       | Home prompt                        |
+| `home_prompt_right`    | `{}`                                                    | `append`        | Right side of home prompt          |
+| `session_prompt`       | `{ session_id, visible?, disabled?, on_submit?, ref? }` | `replace`       | Session prompt                     |
+| `session_prompt_right` | `{ session_id }`                                        | `append`        | Right side of session prompt       |
+| `home_bottom`          | `{}`                                                    | `append`        | Bottom of home content             |
+| `home_footer`          | `{}`                                                    | `single_winner` | Home footer                        |
+| `sidebar_title`        | `{ session_id, title, share_url? }`                     | `single_winner` | Session sidebar title              |
+| `sidebar_content`      | `{ session_id }`                                        | `append`        | Scrollable session sidebar content |
+| `sidebar_footer`       | `{ session_id }`                                        | `single_winner` | Session sidebar footer             |
+
+`home_prompt.ref` and `session_prompt.ref` receive a `TuiPromptRef | undefined`.
+
+### Slot modes
+
+| Mode            | Behavior                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------- |
+| `append`        | Render fallback children first, followed by all ordered contributions. This is the default. |
+| `replace`       | Replace fallback children with all ordered contributions.                                   |
+| `single_winner` | Render the first ordered contribution. Use fallback children when no contribution renders.  |
+
+The host chooses the modes shown above. A plugin can also render a slot directly with `api.ui.Slot` and choose its mode:
+
+```tsx
+api.ui.Slot({
+  name: "example_content",
+  mode: "append",
+  children: <text>Fallback</text>,
+})
+```
+
+Custom slot names require one plugin to render the slot with `api.ui.Slot` and another plugin, or the same plugin, to register a contribution under that name.
+
+---
+
+## State
+
+`api.state` exposes synchronized host state. Read it inside JSX or Solid reactive primitives when rendered output must update.
+
+| Field                           | Type or return value                            |
+| ------------------------------- | ----------------------------------------------- |
+| `ready`                         | `boolean`                                       |
+| `config`                        | SDK `Config`                                    |
+| `provider`                      | Read-only `Provider[]`                          |
+| `path`                          | `{ state, config, worktree, directory }`        |
+| `vcs`                           | `{ branch?, default_branch? } \| undefined`     |
+| `session.count()`               | Number of sessions                              |
+| `session.get(sessionID)`        | `Session \| undefined`                          |
+| `session.diff(sessionID)`       | `ReadonlyArray<{ file, additions, deletions }>` |
+| `session.todo(sessionID)`       | `ReadonlyArray<{ content, status }>`            |
+| `session.messages(sessionID)`   | `ReadonlyArray<Message>`                        |
+| `session.status(sessionID)`     | `SessionStatus \| undefined`                    |
+| `session.permission(sessionID)` | `ReadonlyArray<PermissionRequest>`              |
+| `session.question(sessionID)`   | `ReadonlyArray<QuestionRequest>`                |
+| `part(messageID)`               | `ReadonlyArray<Part>`                           |
+| `lsp()`                         | `ReadonlyArray<{ id, root, status }>`           |
+| `mcp()`                         | `ReadonlyArray<{ name, status, error? }>`       |
+
+Collection getters return empty arrays when no records exist.
+
+---
+
+## Theme
+
+`api.theme` provides the active theme and theme operations:
+
+| Member              | Description                                            |
+| ------------------- | ------------------------------------------------------ |
+| `current`           | Current resolved color tokens                          |
+| `selected`          | Selected theme name                                    |
+| `ready`             | Whether themes have finished loading                   |
+| `has(name)`         | Test whether a theme exists                            |
+| `set(name)`         | Select a theme; returns `false` when it does not exist |
+| `install(jsonPath)` | Install a theme JSON file relative to the plugin       |
+| `mode()`            | Return `"dark"` or `"light"`                           |
+
+### Theme tokens
+
+All color tokens are OpenTUI `RGBA` values.
+
+| Group      | Tokens                                                                                                                                                                                                                                                                            |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Core       | `primary`, `secondary`, `accent`                                                                                                                                                                                                                                                  |
+| Status     | `error`, `warning`, `success`, `info`                                                                                                                                                                                                                                             |
+| Text       | `text`, `textMuted`, `selectedListItemText`                                                                                                                                                                                                                                       |
+| Background | `background`, `backgroundPanel`, `backgroundElement`, `backgroundMenu`                                                                                                                                                                                                            |
+| Border     | `border`, `borderActive`, `borderSubtle`                                                                                                                                                                                                                                          |
+| Diff       | `diffAdded`, `diffRemoved`, `diffContext`, `diffHunkHeader`, `diffHighlightAdded`, `diffHighlightRemoved`, `diffAddedBg`, `diffRemovedBg`, `diffContextBg`, `diffLineNumber`, `diffAddedLineNumberBg`, `diffRemovedLineNumberBg`                                                  |
+| Markdown   | `markdownText`, `markdownHeading`, `markdownLink`, `markdownLinkText`, `markdownCode`, `markdownBlockQuote`, `markdownEmph`, `markdownStrong`, `markdownHorizontalRule`, `markdownListItem`, `markdownListEnumeration`, `markdownImage`, `markdownImageText`, `markdownCodeBlock` |
+| Syntax     | `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation`                                                                                                                         |
+
+`thinkingOpacity` is a numeric token rather than an `RGBA` value.
+
+---
+
+## Events
+
+Subscribe to typed OpenCode events with `api.event.on`:
+
+```ts
+const unsubscribe = api.event.on("session.updated", (event) => {
+  console.debug(event)
+})
+```
+
+The signature is:
+
+```ts
+on<Type extends Event["type"]>(
+  type: Type,
+  handler: (event: Extract<Event, { type: Type }>) => void,
+): () => void
+```
+
+OpenCode tracks event subscriptions and removes them when the plugin is disposed. Call the returned function when a shorter-lived component owns the subscription.
+
+---
+
+## Lifecycle
+
+`api.lifecycle` provides:
+
+| Member                | Description                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `signal`              | `AbortSignal` aborted when disposal starts                                                     |
+| `onDispose(callback)` | Register synchronous or asynchronous cleanup; returns a function that unregisters the callback |
+
+OpenCode also tracks slot registrations, event subscriptions, routes, mode pushes, sound packs, and scoped keymap registrations. It disposes tracked resources in reverse registration order.
+
+---
+
+## UI
+
+`api.ui` exposes host UI primitives:
+
+| Member          | Description                                                       |
+| --------------- | ----------------------------------------------------------------- |
+| `Dialog`        | General dialog container with `medium`, `large`, or `xlarge` size |
+| `DialogAlert`   | Alert dialog                                                      |
+| `DialogConfirm` | Confirmation dialog                                               |
+| `DialogPrompt`  | Text input dialog                                                 |
+| `DialogSelect`  | Typed option selection dialog                                     |
+| `Slot`          | Render a named slot                                               |
+| `Prompt`        | Render the OpenCode prompt component                              |
+| `toast(input)`  | Show an `info`, `success`, `warning`, or `error` toast            |
+| `dialog`        | Control the host dialog stack                                     |
+
+The dialog stack provides `replace`, `clear`, and `setSize`, plus read-only `size`, `depth`, and `open` fields.
+
+---
+
+## Routes
+
+Register routes with `api.route.register`:
+
+```tsx
+const unregister = api.route.register([
+  {
+    name: "example",
+    render: ({ params }) => <text>{String(params?.message ?? "Example")}</text>,
+  },
+])
+
+api.route.navigate("example", { message: "Hello" })
+```
+
+`register` returns an unregister function. `route.current` contains the current route. Built-in route names are `home` and `session`.
+
+---
+
+## Keys, keymap, and modes
+
+`api.keys` formats key sequences according to host display settings:
+
+| Member                     | Return value                             |
+| -------------------------- | ---------------------------------------- |
+| `formatSequence(parts)`    | Formatted key sequence string            |
+| `formatBindings(bindings)` | Formatted bindings string or `undefined` |
+
+`api.keymap` is the OpenTUI `Keymap<Renderable, KeyEvent>`. Registrations made through its scoped registration methods are cleaned up with the plugin.
+
+`api.mode.current()` returns the active mode. `api.mode.push(mode)` pushes a mode and returns a function that removes that entry.
+
+The optional `api.command` member is deprecated. Use keymap layers, `api.keymap.dispatchCommand`, and the `command.palette.show` command instead.
+
+---
+
+## Persistent state and configuration
+
+`api.kv` provides shared persistent state:
+
+| Member                | Description                                          |
+| --------------------- | ---------------------------------------------------- |
+| `get(key, fallback?)` | Read a value, using the fallback for a missing value |
+| `set(key, value)`     | Update and persist a value                           |
+| `ready`               | Whether the initial store has loaded                 |
+
+The KV store is shared between plugins. Prefix keys with the plugin ID to avoid collisions.
+
+Plugin initialization can run before `api.kv.ready` becomes `true`. Wait for readiness, or read KV state from a reactive context, before relying on persisted values. Values passed to `set` must be structured-cloneable and JSON-serializable.
+
+`api.tuiConfig` is a read-only view of the resolved TUI configuration. It includes plugin configuration, keybindings, scrolling, diff style, attention settings, and plugin enabled states.
+
+---
+
+## Attention
+
+Send terminal-mediated notifications and sounds with `api.attention.notify`:
+
+```ts
+const result = await api.attention.notify({
+  title: "Build",
+  message: "Build completed",
+  notification: { when: "blurred" },
+  sound: { name: "done", volume: 0.5 },
+})
+```
+
+Notification and sound timing can be `always`, `focused`, or `blurred`. Sound names are `default`, `question`, `permission`, `error`, `done`, and `subagent_done`.
+
+`api.attention.soundboard` provides `registerPack`, `activate`, `current`, and `list` for semantic sound packs.
+
+---
+
+## Plugin management
+
+`api.plugins` controls TUI plugins at runtime:
+
+| Member                    | Description                                                        |
+| ------------------------- | ------------------------------------------------------------------ |
+| `list()`                  | List plugin IDs, sources, specs, enabled states, and active states |
+| `activate(id)`            | Enable and initialize a plugin                                     |
+| `deactivate(id)`          | Disable and dispose a plugin                                       |
+| `add(spec)`               | Resolve and load a plugin for the current process                  |
+| `install(spec, options?)` | Install a plugin and update local or global configuration          |
+
+`install` updates configuration but does not load the installed plugin into the current process.
+
+---
+
+## Application, client, and renderer
+
+`api.app.version` contains the current OpenCode version.
+
+`api.client` is the typed OpenCode SDK client associated with the TUI. Use it when required data or operations are not available through `api.state`.
+
+`api.renderer` is the raw OpenTUI `CliRenderer`. Prefer `api.ui`, slots, and other scoped APIs unless direct renderer access is required.

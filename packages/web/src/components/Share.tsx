@@ -7,10 +7,13 @@ import { ShareI18nProvider, formatCurrency, formatNumber, normalizeLocale } from
 import styles from "./share.module.css"
 import type { MessageV2 } from "opencode/session/message-v2"
 import type { Message } from "opencode/session/message"
-import type { Session } from "opencode/session/index"
+import type { Session } from "opencode/session/session"
 import { Part, ProviderIcon } from "./share/part"
 
 type MessageWithParts = MessageV2.Info & { parts: MessageV2.Part[] }
+type MessageID = MessageV2.Info["id"]
+type PartID = MessageV2.Part["id"]
+type UserMessage = Extract<MessageV2.Info, { role: "user" }>
 
 type Status = "disconnected" | "connecting" | "connected" | "error" | "reconnecting"
 
@@ -62,7 +65,7 @@ export default function Share(props: {
     messages: Record<string, MessageWithParts>
   }>({
     info: {
-      id: props.id,
+      id: props.id as Session.Info["id"],
       slug: props.info.slug,
       projectID: props.info.projectID,
       directory: props.info.directory,
@@ -499,12 +502,13 @@ export default function Share(props: {
 }
 
 export function fromV1(v1: Message.Info): MessageWithParts {
+  const messageID = v1.id as MessageID
   if (v1.role === "assistant") {
     return {
-      id: v1.id,
+      id: messageID,
       sessionID: v1.metadata.sessionID,
       role: "assistant",
-      parentID: "",
+      parentID: "" as MessageID,
       agent: "build",
       time: {
         created: v1.metadata.time.created,
@@ -528,8 +532,8 @@ export function fromV1(v1: Message.Info): MessageWithParts {
       error: v1.metadata.error,
       parts: v1.parts.flatMap((part, index): MessageV2.Part[] => {
         const base = {
-          id: index.toString(),
-          messageID: v1.id,
+          id: index.toString() as PartID,
+          messageID,
           sessionID: v1.metadata.sessionID,
         }
         if (part.type === "text") {
@@ -569,7 +573,7 @@ export function fromV1(v1: Message.Info): MessageWithParts {
                 if (part.toolInvocation.state === "call") {
                   return {
                     status: "running",
-                    input: part.toolInvocation.args,
+                    input: part.toolInvocation.args as Record<string, unknown>,
                     time: {
                       start: time.start,
                     },
@@ -579,7 +583,7 @@ export function fromV1(v1: Message.Info): MessageWithParts {
                 if (part.toolInvocation.state === "result") {
                   return {
                     status: "completed",
-                    input: part.toolInvocation.args,
+                    input: part.toolInvocation.args as Record<string, unknown>,
                     output: part.toolInvocation.result,
                     title,
                     time,
@@ -598,21 +602,21 @@ export function fromV1(v1: Message.Info): MessageWithParts {
 
   if (v1.role === "user") {
     return {
-      id: v1.id,
+      id: messageID,
       sessionID: v1.metadata.sessionID,
       role: "user",
       agent: "user",
       model: {
-        providerID: "",
-        modelID: "",
+        providerID: "" as UserMessage["model"]["providerID"],
+        modelID: "" as UserMessage["model"]["modelID"],
       },
       time: {
         created: v1.metadata.time.created,
       },
       parts: v1.parts.flatMap((part, index): MessageV2.Part[] => {
         const base = {
-          id: index.toString(),
-          messageID: v1.id,
+          id: index.toString() as PartID,
+          messageID,
           sessionID: v1.metadata.sessionID,
         }
         if (part.type === "text") {
